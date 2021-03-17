@@ -32,17 +32,16 @@ class PolicyGradient(tf.keras.Model):
         self.fc1 = layers.Dense(128, activation="relu")
         self.fc2 = layers.Dense(128, activation="relu")
 
-        self.mu = layers.Dense(n_actions, activation="tanh")
-        self.sig = layers.Dense(n_actions)
+        self.test = layers.Dense(n_actions + n_actions)
+
 
     def call(self, state):
         x = self.fc1(state)
         x = self.fc2(x)
 
-        mu = self.mu(x)
-        sig = self.sig(x)
+        out = self.test(x)
 
-        return mu, tf.exp(sig)
+        return out
 
 
 class Agent:
@@ -58,13 +57,20 @@ class Agent:
 
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr)
 
-    def get_action(self, x):
-        mu, sig = self.model(x)
+    def encode(self, x, raxis=1):
+        mean, logvar = tf.split(self.model(x), num_or_size_splits=2, axis=raxis)
+        return mean, logvar
 
-        action_space = tfp.distributions.Normal(mu, 2)
-        sample_action = action_space.sample()
-        
-        return sample_action
+    def get_action(self, mean, logvar):
+        eps = tf.random.normal(shape=mean.shape)
+        return eps * tf.exp(logvar * .5) + mean
+
+    def log_normal_pdf(self, sample, mean, logvar):
+        log2pi = tf.math.log(2. * np.pi)
+        return tf.reduce_sum(
+            -.5 * ((sample - mean) ** 2. * tf.exp(-logvar) + logvar + log2pi),
+            axis=[1]
+        )
 
     def store_transition(self, s, a, r):
         self.state_buffer.append(np.array([s], np.float32))
@@ -87,43 +93,40 @@ class Agent:
 
         return discount_reward_buffer
 
+    def compute_loss(self, states):
+        discount_reward_buffer_norm = self._discount_and_norm_reward()
+
+        discount_reward_buffer_norm = tf.expand_dims(
+            discount_reward_buffer_norm, axis=1
+        )
+
+        discount_reward_buffer_norm = tf.cast(
+            discount_reward_buffer_norm, dtype=tf.float32
+        )
+
+        mean, logvar = self.encode(states, raxis=2)
+        z = self.get_action(mean, logvar)
+       
+        log_prob = self.log_normal_pdf(z, mean, logvar)
+
+        return -tf.reduce_sum(log_prob * discount_reward_buffer_norm)
+
 
     def learn(self):
         self.var *= 0.995
-
-        discount_reward_buffer_norm = self._discount_and_norm_reward()
 
         with tf.GradientTape() as tape:
             
             state = tf.cast(self.state_buffer, dtype=tf.float32)
             state = tf.squeeze(state, axis=1)
-
-            mu, sig = self.model(state)
-            sig = tf.clip_by_value(sig, 1e-8, 1+1e-8)
-
             
-            action_space = tfp.distributions.Normal(mu, 2)
-            sample_action = action_space.sample()
-            
-            log_prob = action_space.log_prob(sample_action)
-            log_prob = tf.squeeze(log_prob, axis=1)
-            
-            discount_reward_buffer_norm = tf.expand_dims(
-                discount_reward_buffer_norm, axis=1
-            )
+            loss =  self.compute_loss(state)
 
-            discount_reward_buffer_norm = tf.cast(
-                discount_reward_buffer_norm, dtype=tf.float32
-            )
-
-            loss =  tf.reduce_sum(-log_prob * discount_reward_buffer_norm)
-            
         if not tf.math.is_nan(loss):
             grad = tape.gradient(loss, self.model.trainable_weights)
             self.optimizer.apply_gradients(zip(grad, self.model.trainable_weights))
         else:
-            print(f"log_prob shape: {(log_prob)}")
-            print("something went wrong again")
+            print(loss)
             raise TypeError("gradient is nan")
 
         self.state_buffer = []
@@ -162,9 +165,10 @@ if __name__ == '__main__':
             if (episode+1) % 50 == 0:
                 env.render()
 
-            action = agent.get_action(state)
-            action = tf.squeeze(action, axis=0) # shape = (2,)
-
+            mean, logvar = agent.encode(state)
+            action = agent.get_action(mean, logvar)
+            action = tf.squeeze(action, axis=0)
+            
             next_state, reward, done, info = env.step(action)
 
             agent.store_transition(state, action, reward)
