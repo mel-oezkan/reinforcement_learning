@@ -11,6 +11,8 @@ import numpy as np
 
 import tensorflow as tf
 from tensorflow.keras import layers
+from tensorflow.python.keras.backend import dtype
+from tensorflow.python.ops.gen_math_ops import sigmoid_grad_eager_fallback
 
 import tensorflow_probability as tfp
 
@@ -33,21 +35,21 @@ class PolicyGradient(tf.keras.Model):
         self.fc2 = layers.Dense(128, activation="relu")
 
         self.mu = layers.Dense(n_actions, activation="tanh")
-        self.sig = layers.Dense(n_actions)
+        self.sig = layers.Dense(n_actions, activation="sigmoid")
 
     def call(self, state):
         x = self.fc1(state)
         x = self.fc2(x)
 
         mu = self.mu(x)
-        sig = self.sig(x)
+        sig = self.sig(x) + 1e-8
 
-        return mu, tf.exp(sig)
+        return mu, sig
 
 
 class Agent:
     def __init__(self, VAR, lr=0.01, gamma=0.9999):
-        self.var = VAR
+
         self.gamma = gamma
 
         self.state_buffer = []
@@ -61,7 +63,7 @@ class Agent:
     def get_action(self, x):
         mu, sig = self.model(x)
 
-        action_space = tfp.distributions.Normal(mu, 2)
+        action_space = tfp.distributions.Normal(mu, sig)
         sample_action = action_space.sample()
         
         return sample_action
@@ -73,7 +75,7 @@ class Agent:
 
     def _discount_and_norm_reward(self):
         """ compute discount_and_norm_rewards """
-        discount_reward_buffer = np.zeros_like(self.reward_buffer)
+        discount_reward_buffer = np.zeros((len(self.reward_buffer), 1))
         running_add = 0
 
         for t in reversed(range(0, len(self.reward_buffer))):
@@ -89,7 +91,6 @@ class Agent:
 
 
     def learn(self):
-        self.var *= 0.995
 
         discount_reward_buffer_norm = self._discount_and_norm_reward()
 
@@ -99,22 +100,16 @@ class Agent:
             state = tf.squeeze(state, axis=1)
 
             mu, sig = self.model(state)
-            sig = tf.clip_by_value(sig, 1e-8, 1+1e-8)
-
             
-            action_space = tfp.distributions.Normal(mu, 2)
+            action_space = tfp.distributions.Normal(mu, sig)
             sample_action = action_space.sample()
             
             log_prob = action_space.log_prob(sample_action)
             log_prob = tf.squeeze(log_prob, axis=1)
             
-            discount_reward_buffer_norm = tf.expand_dims(
-                discount_reward_buffer_norm, axis=1
-            )
+            discount_reward_buffer_norm = tf.convert_to_tensor(
+                discount_reward_buffer_norm, dtype=tf.float32)
 
-            discount_reward_buffer_norm = tf.cast(
-                discount_reward_buffer_norm, dtype=tf.float32
-            )
 
             loss =  tf.reduce_sum(-log_prob * discount_reward_buffer_norm)
             
@@ -122,7 +117,8 @@ class Agent:
             grad = tape.gradient(loss, self.model.trainable_weights)
             self.optimizer.apply_gradients(zip(grad, self.model.trainable_weights))
         else:
-            print(f"log_prob shape: {(log_prob)}")
+            print(f"sample action: {(state.shape)}")
+            
             print("something went wrong again")
             raise TypeError("gradient is nan")
 
@@ -149,6 +145,8 @@ if __name__ == '__main__':
     t0 = time.time()
 
     print(f"action spce: {env.action_space}")
+    max_rew = 0
+    min_rew = 0
 
     all_episode_reward = []
     for episode in range(TRAIN_EPS):
@@ -178,7 +176,7 @@ if __name__ == '__main__':
 
         agent.learn()
         print(
-            'Training  | Episode: {}/{}  | Episode Reward: {:.0f}  | Running Time: {:.4f}'.format(
+            '| Episode: {}/{}  | Episode Reward: {:.0f}  | Running Time: {:.4f}'.format(
                 episode + 1, TRAIN_EPS, episode_reward,
                 time.time() - t0
             )

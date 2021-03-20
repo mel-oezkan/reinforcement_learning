@@ -145,6 +145,7 @@ class Agent:
 
 if __name__ == '__main__':
 
+
     env = gym.make(ENV_ID).unwrapped
 
     agent = Agent(VAR)
